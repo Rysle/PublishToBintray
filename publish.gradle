@@ -1,0 +1,278 @@
+/**
+ *  Copyright 2019 Rysle
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License");
+ *  you may not use this file except in compliance with the License.
+ *  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ *  distributed under the License is distributed on an "AS IS" BASIS,
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ *  See the License for the specific language governing permissions and
+ *  limitations under the License.
+ */
+
+apply plugin: 'maven'
+apply plugin: 'signing'
+
+println "> Load properties from file: "
+
+final String PROPERTIES_FILE_NAME = 'publish.properties'
+if (!project.hasProperty("publish")) {
+    Properties config = new Properties()
+    project.ext.set("publish", config)
+
+    File file = project.file(PROPERTIES_FILE_NAME)
+    if (file.exists()) {
+        FileInputStream inputStream = null
+        try {
+            inputStream = new FileInputStream(file)
+            config.load(inputStream)
+        } catch (Throwable tr) {
+            tr.printStackTrace()
+        } finally {
+            if (inputStream != null) {
+                try {
+                    inputStream.close()
+                } catch (Throwable tr) {
+                    tr.printStackTrace()
+                }
+            }
+        }
+    }
+
+    println " Config: " + project.publish
+}
+
+def getConfig(String key) {
+    return project.publish.getProperty(key)
+}
+
+def hasConfig(String key) {
+    return project.publish.containsKey(key)
+}
+
+def localMavenRepo() {
+    'file://' + new File(System.getProperty('user.home'), '.m2/repository').absolutePath
+}
+
+boolean isSnapshotBuild() {
+    if (hasConfig("SNAPSHOT")) {
+        return ("true" == getConfig("SNAPSHOT"))
+    }
+    return true
+}
+
+String getLibVersion() {
+    def pomVersion = project.publish.POM_VERSION
+    def buildVersion
+    if (pomVersion) {
+        buildVersion = pomVersion
+    } else {
+        buildVersion = '0.0.1'
+    }
+
+    if (isSnapshotBuild() && !buildVersion.endsWith("-SNAPSHOT")) {
+        buildVersion = buildVersion + "-SNAPSHOT"
+    }
+    return buildVersion
+}
+
+def getReleaseRepositoryUrl() {
+    if (hasConfig('SERVER')) {
+        if ("local" == getConfig("SERVER")) {
+           return localMavenRepo()
+        } else if ("bintray" == getConfig("SERVER")) {
+            final String apiUrl = "https://api.bintray.com/maven"
+            final String userName = hasConfig('BINTRAY_USER_NAME') ? getConfig("BINTRAY_USER_NAME") : "maven"
+            final String repoName = hasConfig('BINTRAY_REPO_NAME') ? getConfig("BINTRAY_REPO_NAME") : getConfig("REPOSITORY_USERNAME")
+            final String pkgName = hasConfig('BINTRAY_PKG_NAME') ? getConfig("BINTRAY_PKG_NAME") : getConfig("POM_ARTIFACT_ID")
+            return apiUrl + "/" \
+            + userName + "/" \
+            + repoName + "/" \
+            + pkgName + "/" \
+            + ";publish=1"
+        } else {
+            return project.publish.RELEASE_REPOSITORY_URL
+        }
+    } else {
+        return localMavenRepo()
+    }
+}
+
+def getSnapshotRepositoryUrl() {
+    if (hasConfig('SERVER')) {
+        if ("local" == getConfig("SERVER")) {
+            return localMavenRepo()
+        } else if ("bintray" == getConfig("SERVER")) {
+            final String apiUrl = "http://oss.jfrog.org/oss-snapshot-local/"
+            return apiUrl
+        } else {
+            return project.publish.SNAPSHOT_REPOSITORY_URL
+        }
+    } else {
+        return localMavenRepo()
+    }
+}
+
+def getRepositoryUsername() {
+    return project.publish.REPOSITORY_USERNAME
+}
+
+def getRepositoryPassword() {
+    return project.publish.REPOSITORY_PASSWORD
+}
+
+afterEvaluate { project ->
+
+    println "> Config upload task..."
+    def isAndroidProject = project.plugins.hasPlugin('com.android.application') || project.plugins.hasPlugin('com.android.library')
+    uploadArchives {
+        println "> Upload archives..."
+        repositories {
+            mavenDeployer {
+                println "> Config maven deploy..."
+
+                beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
+
+                pom.groupId = project.publish.POM_GROUP_ID
+                pom.artifactId = project.publish.POM_ARTIFACT_ID
+                pom.version = getLibVersion()
+
+                project.group = pom.groupId
+                project.version = pom.version
+
+                println "pom.groupId: " + pom.groupId
+                println "pom.artifactId: " + pom.artifactId
+                println "pom.version: " + pom.version
+
+                repository(url: getReleaseRepositoryUrl()) {
+                    authentication(userName: getRepositoryUsername(), password: getRepositoryPassword())
+                }
+                snapshotRepository(url: getSnapshotRepositoryUrl()) {
+                    authentication(userName: getRepositoryUsername(), password: getRepositoryPassword())
+                }
+
+                pom.project {
+                    name = project.publish.POM_NAME
+                    packaging = project.publish.POM_PACKAGING
+                    description project.publish.POM_DESCRIPTION
+                    url project.publish.POM_URL
+
+                    scm {
+                        url project.publish.POM_SCM_URL
+                        connection project.publish.POM_SCM_CONNECTION
+                        developerConnection project.publish.POM_SCM_DEV_CONNECTION
+                    }
+
+                    licenses {
+                        license {
+                            name project.publish.POM_LICENCE_NAME
+                            url project.publish.POM_LICENCE_URL
+                            distribution project.publish.POM_LICENCE_DIST
+                        }
+                    }
+
+                    developers {
+                        developer {
+                            id project.publish.POM_DEVELOPER_ID
+                            name project.publish.POM_DEVELOPER_NAME
+                            email project.publish.POM_DEVELOPER_EMAIL
+                            organization = project.publish.POM_DEVELOPER_ORG
+                        }
+                    }
+                }
+            }
+        }
+
+        doLast {
+            println "> Published to repo: ${project.group}:${project.name}:${project.version}"
+        }
+    }
+
+    signing {
+        required { !isSnapshotBuild() && gradle.taskGraph.hasTask('uploadArchives') }
+        println "> Begin singing..."
+        sign configurations.archives
+    }
+
+    if (isAndroidProject) {
+        task androidSourcesJar(type: Jar) {
+            println "> Begin androidSourcesJar..."
+            classifier = 'sources'
+            from project.android.sourceSets.main.java.source
+        }
+
+        artifacts {
+            archives androidSourcesJar
+        }
+    } else if (project.plugins.hasPlugin('java')) {
+        task sourcesJar(type: Jar, dependsOn: classes) {
+            println "> Begin sourcesJar..."
+            classifier = 'sources'
+            from sourceSets.main.allSource
+        }
+
+        artifacts {
+            archives sourcesJar
+        }
+    }
+
+    println "> Will publish artifacts in ${configurations.archives}:"
+    configurations.archives.artifacts.files.files.each { println "\t$it" }
+
+    // See http://blog.joda.org/2014/02/turning-off-doclint-in-jdk-8-javadoc.html.
+    if (JavaVersion.current().isJava8Compatible()) {
+        allprojects {
+            tasks.withType(Javadoc) {
+                options.addStringOption('Xdoclint:none', '-quiet')
+            }
+        }
+    }
+
+    final String assembleTaskName = 'assembleRelease'
+    Task asTask = project.tasks.findByName(assembleTaskName)
+    if (asTask) {
+        println "> Found task:assembleRelease, append doLast..."
+        if (isAndroidProject) {
+            asTask.dependsOn androidSourcesJar
+        } else if (project.plugins.hasPlugin('java')) {
+            asTask.dependsOn sourceJar
+        }
+
+        // auto upload after build finished
+        if (hasConfig('AUTO_UPLOAD') && "true" == getConfig("AUTO_UPLOAD")) {
+            asTask.finalizedBy uploadArchives
+        }
+    }
+}
+
+project.extensions.getLibVersion = { ->
+    return getLibVersion()
+}
+
+project.extensions.getCommitSha = { ->
+    try {
+        String gitRev = 'git rev-parse --short HEAD'.execute(null, project.rootDir).text.trim()
+        if (gitRev == null) {
+            throw new GradleException("can't get git rev, you should add git to system path or just input test value, such as 'testTinkerId'")
+        }
+        return gitRev
+    } catch (Exception e) {
+        throw new GradleException("can't get git rev, you should add git to system path or just input test value, such as 'testTinkerId'", e)
+    }
+}
+
+project.extensions.getCommitTime = { ->
+    try {
+        String commitTime = 'git log -1 --format=%cd'.execute(null, project.rootDir).text.trim()
+        if (commitTime == null) {
+            throw new GradleException("can't get last commit time, you should add git to system path or just input test value")
+        }
+        return commitTime
+    } catch (Exception e) {
+        throw new GradleException("can't get last commit time, you should add git to system path or just input test value", e)
+    }
+}
